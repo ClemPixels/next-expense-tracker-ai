@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react';
 import { getAIInsights } from '@/app/actions/getAIInsights';
 import { generateInsightAnswer } from '@/app/actions/generateInsightAnswer';
 
+import { RefreshCw } from 'lucide-react';
+
 interface InsightData {
   id: string;
   type: 'warning' | 'info' | 'success' | 'tip';
@@ -248,7 +250,7 @@ const AIInsights = () => {
             className='w-7 h-7 sm:w-8 sm:h-8 bg-gradient-to-r from-emerald-600 via-green-500 to-teal-500 hover:from-emerald-700 hover:via-green-600 hover:to-teal-600 text-white rounded-xl flex items-center justify-center shadow-lg hover:shadow-xl transition-all duration-200'
             disabled={isLoading}
           >
-            <span className='text-sm'>🔄</span>
+            <span className='text-sm'><RefreshCw /></span>
           </button>
         </div>
       </div>

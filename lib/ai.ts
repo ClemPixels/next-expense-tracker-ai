@@ -34,11 +34,35 @@ export interface AIInsight {
   confidence: number;
 }
 
+/**
+ * Retry wrapper with exponential backoff
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries = 5,
+  baseDelay = 1000
+): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (err: any) {
+      if (err.status === 429 && i < retries - 1) {
+        const delay = baseDelay * Math.pow(2, i); // exponential
+        console.warn(`⏳ Rate limit hit. Retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw new Error('Max retries reached');
+}
+
 export async function generateExpenseInsights(
   expenses: ExpenseRecord[]
 ): Promise<AIInsight[]> {
   try {
-    // Prepare expense data for AI analysis
     const expensesSummary = expenses.map((expense) => ({
       amount: expense.amount,
       category: expense.category,
@@ -47,80 +71,61 @@ export async function generateExpenseInsights(
     }));
 
     const prompt = `Analyze the following expense data and provide 3-4 actionable financial insights. 
-    Return a JSON array of insights with this structure:
-    {
-      "type": "warning|info|success|tip",
-      "title": "Brief title",
-      "message": "Detailed insight message with specific numbers when possible",
-      "action": "Actionable suggestion",
-      "confidence": 0.8
-    }
+Return a JSON array of insights with this structure:
+{
+  "type": "warning|info|success|tip",
+  "title": "Brief title",
+  "message": "Detailed insight message with specific numbers when possible",
+  "action": "Actionable suggestion",
+  "confidence": 0.8
+}
 
-    Expense Data:
-    ${JSON.stringify(expensesSummary, null, 2)}
+Expense Data:
+${JSON.stringify(expensesSummary, null, 2)}
 
-    Focus on:
-    1. Spending patterns (day of week, categories)
-    2. Budget alerts (high spending areas)
-    3. Money-saving opportunities
-    4. Positive reinforcement for good habits
+Focus on:
+1. Spending patterns (day of week, categories)
+2. Budget alerts (high spending areas)
+3. Money-saving opportunities
+4. Positive reinforcement for good habits
 
-    Return only valid JSON array, no additional text.`;
+Return only valid JSON array, no additional text.`;
 
-    const completion = await openai.chat.completions.create({
-      model: 'deepseek/deepseek-chat-v3-0324:free',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a financial advisor AI that analyzes spending patterns and provides actionable insights. Always respond with valid JSON only.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-
-    const response = completion.choices[0].message.content;
-    if (!response) {
-      throw new Error('No response from AI');
-    }
-
-    // Clean the response by removing markdown code blocks if present
-    let cleanedResponse = response.trim();
-    if (cleanedResponse.startsWith('```json')) {
-      cleanedResponse = cleanedResponse
-        .replace(/^```json\s*/, '')
-        .replace(/\s*```$/, '');
-    } else if (cleanedResponse.startsWith('```')) {
-      cleanedResponse = cleanedResponse
-        .replace(/^```\s*/, '')
-        .replace(/\s*```$/, '');
-    }
-
-    // Parse AI response
-    const insights = JSON.parse(cleanedResponse);
-
-    // Add IDs and ensure proper format
-    const formattedInsights = insights.map(
-      (insight: RawInsight, index: number) => ({
-        id: `ai-${Date.now()}-${index}`,
-        type: insight.type || 'info',
-        title: insight.title || 'AI Insight',
-        message: insight.message || 'Analysis complete',
-        action: insight.action,
-        confidence: insight.confidence || 0.8,
+    const completion = await withRetry(() =>
+      openai.chat.completions.create({
+        model: 'deepseek/deepseek-chat-v3-0324:free',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a financial advisor AI that analyzes spending patterns and provides actionable insights. Always respond with valid JSON only.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 1000,
       })
     );
 
-    return formattedInsights;
+    let response = completion.choices[0].message.content;
+    if (!response) throw new Error('No response from AI');
+
+    response = response.trim();
+    if (response.startsWith('```')) {
+      response = response.replace(/```(json)?/, '').replace(/```$/, '').trim();
+    }
+
+    const insights = JSON.parse(response);
+    return insights.map((insight: RawInsight, index: number) => ({
+      id: `ai-${Date.now()}-${index}`,
+      type: (insight.type as AIInsight['type']) || 'info',
+      title: insight.title || 'AI Insight',
+      message: insight.message || 'Analysis complete',
+      action: insight.action,
+      confidence: insight.confidence || 0.8,
+    }));
   } catch (error) {
     console.error('❌ Error generating AI insights:', error);
-
-    // Fallback to mock insights if AI fails
     return [
       {
         id: 'fallback-1',
@@ -137,25 +142,23 @@ export async function generateExpenseInsights(
 
 export async function categorizeExpense(description: string): Promise<string> {
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'deepseek/deepseek-chat-v3-0324:free',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are an expense categorization AI. Categorize expenses into one of these categories: Food, Transportation, Entertainment, Shopping, Bills, Healthcare, Other. Respond with only the category name.',
-        },
-        {
-          role: 'user',
-          content: `Categorize this expense: "${description}"`,
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 20,
-    });
+    const completion = await withRetry(() =>
+      openai.chat.completions.create({
+        model: 'deepseek/deepseek-chat-v3-0324:free',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are an expense categorization AI. Categorize expenses into one of these categories: Food, Transportation, Entertainment, Shopping, Bills, Healthcare, Other. Respond with only the category name.',
+          },
+          { role: 'user', content: `Categorize this expense: "${description}"` },
+        ],
+        temperature: 0.1,
+        max_tokens: 20,
+      })
+    );
 
     const category = completion.choices[0].message.content?.trim();
-
     const validCategories = [
       'Food',
       'Transportation',
@@ -166,10 +169,7 @@ export async function categorizeExpense(description: string): Promise<string> {
       'Other',
     ];
 
-    const finalCategory = validCategories.includes(category || '')
-      ? category!
-      : 'Other';
-    return finalCategory;
+    return validCategories.includes(category || '') ? category! : 'Other';
   } catch (error) {
     console.error('❌ Error categorizing expense:', error);
     return 'Other';
@@ -190,42 +190,39 @@ export async function generateAIAnswer(
 
     const prompt = `Based on the following expense data, provide a detailed and actionable answer to this question: "${question}"
 
-    Expense Data:
-    ${JSON.stringify(expensesSummary, null, 2)}
+Expense Data:
+${JSON.stringify(expensesSummary, null, 2)}
 
-    Provide a comprehensive answer that:
-    1. Addresses the specific question directly
-    2. Uses concrete data from the expenses when possible
-    3. Offers actionable advice
-    4. Keeps the response concise but informative (2-3 sentences)
-    
-    Return only the answer text, no additional formatting.`;
+Provide a comprehensive answer that:
+1. Addresses the specific question directly
+2. Uses concrete data from the expenses when possible
+3. Offers actionable advice
+4. Keeps the response concise but informative (2-3 sentences)
 
-    const completion = await openai.chat.completions.create({
-      model: 'deepseek/deepseek-chat-v3-0324:free',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a helpful financial advisor AI that provides specific, actionable answers based on expense data. Be concise but thorough.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 200,
-    });
+Return only the answer text, no additional formatting.`;
+
+    const completion = await withRetry(() =>
+      openai.chat.completions.create({
+        model: 'deepseek/deepseek-chat-v3-0324:free',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a helpful financial advisor AI that provides specific, actionable answers based on expense data. Be concise but thorough.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 200,
+      })
+    );
 
     const response = completion.choices[0].message.content;
-    if (!response) {
-      throw new Error('No response from AI');
-    }
+    if (!response) throw new Error('No response from AI');
 
     return response.trim();
   } catch (error) {
     console.error('❌ Error generating AI answer:', error);
-    return "I'm unable to provide a detailed answer at the moment. Please try refreshing the insights or check your connection.";
+    return "I'm unable to provide a detailed answer at the moment. Please try again later.";
   }
 }
